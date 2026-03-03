@@ -35,6 +35,6 @@ if __name__ == "__main__":
 
     with open(output_file, "w", encoding="utf-8") as f:
         for chunk_data in all_chunks:
-            f.write(json.dumps(chunk_data) + "\n")
+            f.write(json.dumps(chunk_data, ensure_ascii=False) + "\n")
             
     print(f"Split {len(all_chunks)} total chunks successfully!")

@@ -27,3 +27,4 @@ rouge-score>=0.1.2
 
 selenium
 webdriver-manager
+ollama
