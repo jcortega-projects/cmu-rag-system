@@ -1,7 +1,7 @@
 # CMU Pittsburgh-Centric RAG Pipeline
 
 ## Project Overview
-This repository contains a custom Retrieval-Augmented Generation (RAG) system built for CMU Advanced NLP to answer hyper-local, temporal questions about Pittsburgh and Carnegie Mellon University. The current pipeline is fully modular and includes ingestion, chunking, dense + sparse indexing, hybrid retrieval, and local LLM answer generation for leaderboard submission.
+This repository contains a custom Retrieval-Augmented Generation (RAG) system for CMU Advanced NLP, focused on hyper-local and temporal QA about Pittsburgh and Carnegie Mellon University. The pipeline includes multi-source ingestion, chunking, dense + sparse indexing, configurable retrieval mode selection (`dense`, `sparse`, `hybrid`), and local Llama 3.1 generation.
 
 ## Repository Structure
 ```text
@@ -49,13 +49,16 @@ data/
         └── vocab.index.json
 
 system_outputs/
-└── submission.json
+├── submission_dense.json
+├── submission_sparse.json
+├── submission_hybrid.json
+└── query_debug.jsonl
 
-leaderboard_queries.txt
+leaderboard_queries.json
 ```
 
 ## Setup & Installation
-Run from the repository root:
+Run from repository root:
 
 ```bash
 python3 -m venv .venv
@@ -65,26 +68,32 @@ pip install -r requirements.txt
 ```
 
 ## Crucial Context (Apple Silicon M4 Pro)
-- Development environment: Apple Silicon MacBook Pro (M4 Pro).
-- Retrieval stack uses `faiss-cpu` (no CUDA/GPU flags required on macOS).
-- Selenium dynamic scraping requires local Google Chrome; `webdriver-manager` resolves ChromeDriver automatically.
-- Generation uses local Ollama from Python (`ollama` package). Install Ollama app and pull model once:
+- Development machine: Apple Silicon MacBook Pro (M4 Pro).
+- Retrieval stack uses `faiss-cpu` on macOS (no CUDA/GPU flags required).
+- Dynamic scraping uses Selenium and requires local Google Chrome; `webdriver-manager` resolves ChromeDriver.
+- Generation uses local Ollama; pull model first:
 
 ```bash
 ollama pull llama3.1
 ```
 
 ## Reproducible Pipeline Execution
-All commands below assume you are at repo root with the virtual environment activated.
+All commands assume virtual environment is active.
 
-### Option A: Run Full Build (Stages 1-4) with One Command
-This clears `data/processed/` and `data/index/` first, then rebuilds ingestion, chunking, dense index, and sparse index:
+### Option A: Full Build (Stages 1-4)
+This clears `data/processed/` and `data/index/`, then rebuilds ingestion, chunking, dense index, and sparse index:
 
 ```bash
 python -m src.pipeline
 ```
 
-### Option B: Run Stages Manually (Recommended for Debugging)
+Optional: run generation right after build:
+
+```bash
+RUN_GENERATION_AFTER_BUILD=1 python -m src.pipeline
+```
+
+### Option B: Manual Run (Debug-Friendly)
 #### Step 1: Data Ingestion
 ```bash
 python -m src.ingestion.data_ingestion
@@ -92,20 +101,20 @@ python -m src.ingestion.data_ingestion
 Output:
 - `data/processed/scraped_websites.jsonl`
 
-#### Step 2: Text Chunking
+#### Step 2: Chunking
 ```bash
 python -m src.chunking.text_splitter
 ```
 Output:
 - `data/processed/chunks.jsonl`
 
-Sanity check:
+Quick check:
 ```bash
 wc -l data/processed/chunks.jsonl
 ```
-Current checked output in this workspace is `3171`, but this can vary because dynamic event/news pages change over time.
+Chunk count can vary due to dynamic event pages.
 
-#### Step 3: Dense Vector Indexing (FAISS)
+#### Step 3: Dense Index
 ```bash
 python -m src.retrieval.dense
 ```
@@ -113,41 +122,42 @@ Outputs:
 - `data/index/dense.index`
 - `data/index/metadata.json`
 
-#### Step 4: Sparse Indexing (BM25)
+#### Step 4: Sparse Index
 ```bash
 python -m src.retrieval.sparse
 ```
 Output:
 - `data/index/bm25_index/*`
 
-#### Step 5: Generation / End-to-End Leaderboard File
+#### Step 5: End-to-End QA Generation
+Set retrieval mode in `src/main.py`:
+- `RETRIEVAL_MODE = "dense"` for FAISS-only
+- `RETRIEVAL_MODE = "sparse"` for BM25-only
+- `RETRIEVAL_MODE = "hybrid"` for fused retrieval
+
+Then run:
+
 ```bash
 python -m src.main
 ```
+
 Inputs:
-- `leaderboard_queries.txt`
-- `data/index/` (dense + sparse + metadata)
+- `leaderboard_queries.json`
+- `data/index/`
 
-Output:
-- `system_outputs/submission.json`
-
-## Additional Run Commands
-Test hybrid retrieval only:
-
-```bash
-python -m src.retrieval.searcher
-```
+Outputs:
+- `system_outputs/submission_dense.json` when mode is `dense`
+- `system_outputs/submission_sparse.json` when mode is `sparse`
+- `system_outputs/submission_hybrid.json` when mode is `hybrid`
+- `system_outputs/query_debug.jsonl` per-query retrieval/answer log
 
 ## Architectural Notes
-- URL targets are config-driven (`config/urls.json`) so static and dynamic source lists can be expanded without changing ingestion code.
-- Ingestion is multi-modal and unified: baseline local HTML snapshots + static pages (`requests`) + JS-heavy dynamic pages (Selenium headless Chrome) + dynamic PDF directory loading from `data/raw/pdfs/*.pdf`.
-- HTML normalization includes generic boilerplate stripping and Wikipedia-specific noise removal (`reflist`, `navbox`, `reference`, `mw-editsection`, `infobox`) to reduce retrieval contamination.
-- Chunking uses a sliding window with `chunk_size=1000` and `overlap=200` to preserve semantic continuity around boundary spans.
-- Dense retrieval uses `all-MiniLM-L6-v2` embeddings with FAISS `IndexFlatL2`.
-- Sparse retrieval uses BM25 via `bm25s` and stores a serialized sub-index under `data/index/bm25_index/`.
-- Hybrid retrieval (`src/retrieval/searcher.py`) fuses dense and sparse rankings using Reciprocal Rank Fusion (RRF), then returns top-k chunks for answer generation.
-- Reader/generator (`src/generation/reader.py`) calls local `llama3.1` through Ollama with a strict prompt that enforces concise answers and `"Not found"` when evidence is absent.
+- URL targets are config-driven via `config/urls.json`.
+- Ingestion is multi-source: baseline local HTML + static web requests + local PDFs + dynamic Selenium pages.
+- Dynamic ingestion includes optional depth-1 same-domain link expansion for event-heavy pages.
+- HTML cleaning preserves line structure (instead of fully flattening) to keep date/address/phone cues.
+- Chunking uses a sliding window (`chunk_size=1000`, `overlap=200`) and emits chunk metadata (`source_type`, boundaries, length).
+- Retrieval supports 3 hardcoded modes (`dense`, `sparse`, `hybrid`) in `src/retrieval/searcher.py`.
+- Hybrid retrieval uses dense+BM25 candidate pools, RRF fusion, lightweight reranking, and per-document diversity cap.
+- Reader uses local Ollama (`llama3.1`) and currently returns raw model text with `.strip()` only (no post-processing in `generate_answer`).
 
-## Notes for TAs
-- If `src.main` fails at generation time, verify Ollama is installed/running and `llama3.1` is available locally.
-- `src.main` currently hardcodes `andrew_id="jcortega"` in code. Update this field in `src/main.py` if you are running under a different identifier.
